@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Crypto Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .start-btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .start-btn:hover {
+            background-color: #45a049;
+        }
+        .status {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            background-color: #333;
+            border-radius: 5px;
+        }
+        .crypto-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+        .crypto-card {
+            background-color: #2d2d2d;
+            border-radius: 10px;
+            padding: 20px;
+            border: 2px solid #444;
+        }
+        .crypto-symbol {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4CAF50;
+            margin-bottom: 10px;
+        }
+        .market-title {
+            font-size: 14px;
+            color: #aaa;
+            margin-bottom: 15px;
+            line-height: 1.4;
+        }
+        .price-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .price-label {
+            color: #ccc;
+        }
+        .price-value {
+            font-weight: bold;
+        }
+        .current-price {
+            color: #fff;
+            font-size: 18px;
+        }
+        .trigger-price {
+            color: #ffa500;
+        }
+        .difference-positive {
+            color: #4CAF50;
+        }
+        .difference-negative {
+            color: #f44336;
+        }
+        .last-updated {
+            font-size: 12px;
+            color: #888;
+            margin-top: 10px;
+        }
+        .no-data {
+            text-align: center;
+            color: #888;
+            font-size: 18px;
+            margin-top: 50px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Polymarket Crypto Price Dashboard</h1>
+        <p>Real-time crypto prices for markets ending within 1 hour</p>
+    </div>
+
+    <div class="controls">
+        <button class="start-btn" onclick="startTracking()">Start Tracking</button>
+    </div>
+
+    <div class="status" id="status">
+        Ready to start tracking...
+    </div>
+
+    <div class="crypto-grid" id="cryptoGrid">
+        <div class="no-data">No data available. Click "Start Tracking" to begin.</div>
+    </div>
+
+    <script>
+        const socket = io();
+        
+        socket.on('connect', function() {
+            console.log('Connected to server');
+            updateStatus('Connected to server');
+        });
+
+        socket.on('disconnect', function() {
+            console.log('Disconnected from server');
+            updateStatus('Disconnected from server');
+        });
+
+        socket.on('price_update', function(data) {
+            updateCryptoGrid(data.data);
+        });
+
+        socket.on('status', function(data) {
+            updateStatus(data.message);
+        });
+
+        function startTracking() {
+            socket.emit('start_tracking');
+            updateStatus('Starting tracking...');
+        }
+
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+
+        function updateCryptoGrid(cryptoData) {
+            const grid = document.getElementById('cryptoGrid');
+            
+            if (!cryptoData || cryptoData.length === 0) {
+                grid.innerHTML = '<div class="no-data">No crypto data available</div>';
+                return;
+            }
+
+            grid.innerHTML = '';
+            
+            cryptoData.forEach(crypto => {
+                const card = createCryptoCard(crypto);
+                grid.appendChild(card);
+            });
+        }
+
+        function createCryptoCard(crypto) {
+            const card = document.createElement('div');
+            card.className = 'crypto-card';
+            
+            let differenceHtml = '';
+            if (crypto.price_difference !== null && crypto.price_difference_percent !== null) {
+                const sign = crypto.price_difference >= 0 ? '+' : '';
+                const className = crypto.price_difference >= 0 ? 'difference-positive' : 'difference-negative';
+                differenceHtml = `
+                    <div class="price-row">
+                        <span class="price-label">Difference:</span>
+                        <span class="price-value ${className}">
+                            ${sign}$${crypto.price_difference.toFixed(2)} (${sign}${crypto.price_difference_percent.toFixed(2)}%)
+                        </span>
+                    </div>
+                `;
+            }
+
+            // UP/DOWN prices section
+            let upDownHtml = '';
+            if (crypto.up_price !== null || crypto.down_price !== null) {
+                upDownHtml = `
+                    <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #444;">
+                        <div style="font-weight: bold; margin-bottom: 8px; color: #4CAF50;">Order Book Prices:</div>
+                        <div class="price-row">
+                            <span class="price-label">UP Price:</span>
+                            <span class="price-value" style="color: #4CAF50;">$${crypto.up_price ? crypto.up_price.toFixed(4) : 'N/A'}</span>
+                        </div>
+                        <div class="price-row">
+                            <span class="price-label">DOWN Price:</span>
+                            <span class="price-value" style="color: #f44336;">$${crypto.down_price ? crypto.down_price.toFixed(4) : 'N/A'}</span>
+                        </div>
+                    </div>
+                `;
+            }
+
+            const lastUpdated = crypto.last_updated ? new Date(crypto.last_updated).toLocaleString() : 'Never';
+            const orderbookUpdated = crypto.orderbook_updated ? new Date(crypto.orderbook_updated).toLocaleString() : 'Never';
+
+            card.innerHTML = `
+                <div class="crypto-symbol">${crypto.symbol}</div>
+                <div class="market-title">${crypto.market_title}</div>
+                <div class="price-row">
+                    <span class="price-label">Current Price:</span>
+                    <span class="price-value current-price">$${crypto.current_price || 'N/A'}</span>
+                </div>
+                <div class="price-row">
+                    <span class="price-label">Trigger Price:</span>
+                    <span class="price-value trigger-price">$${crypto.trigger_price || 'N/A'}</span>
+                </div>
+                ${differenceHtml}
+                ${upDownHtml}
+                <div class="last-updated">Price updated: ${lastUpdated}</div>
+                <div class="last-updated">Orderbook updated: ${orderbookUpdated}</div>
+            `;
+            
+            return card;
+        }
+    </script>
+</body>
+</html>
