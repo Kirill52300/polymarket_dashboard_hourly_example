@@ -50,41 +50,24 @@ class DashboardTracker(CryptoPriceTracker):
     def update_global_price_dict(self):
         """Override to emit data to dashboard instead of printing"""
         try:
-            for symbol in self.symbols:
-                current_price = self.prices.get(symbol, {}).get("price")
-                trigger_data = self.trigger_prices.get(symbol, {})
-                trigger_price = trigger_data.get("price") if isinstance(trigger_data, dict) else trigger_data
-                market_title = trigger_data.get("market_title", "Unknown Market") if isinstance(trigger_data, dict) else "Unknown Market"
-                
-                # Calculate differences
-                price_diff = None
-                price_diff_percent = None
-                if current_price and trigger_price:
-                    price_diff = current_price - trigger_price
-                    price_diff_percent = (price_diff / trigger_price) * 100
-                
-                # Get existing data to preserve UP/DOWN prices
-                existing_data = self.global_price_dict.get(symbol, {})
-                
-                self.global_price_dict[symbol] = {
-                    "symbol": symbol,
-                    "market_title": market_title,
-                    "current_price": current_price,
-                    "trigger_price": trigger_price,
-                    "price_difference": price_diff,
-                    "price_difference_percent": price_diff_percent,
-                    "last_updated": self.prices.get(symbol, {}).get("timestamp"),
-                    "up_price": existing_data.get("up_price"),
-                    "down_price": existing_data.get("down_price"),
-                    "orderbook_updated": existing_data.get("orderbook_updated")
-                }
+            # Call parent method to update the dictionary
+            super().update_global_price_dict()
+            
+            # Convert to list for dashboard (each market as separate item)
+            dashboard_data = []
+            for market_key, market_data in self.global_price_dict.items():
+                dashboard_data.append(market_data)
+            
+            print(f"Emitting {len(dashboard_data)} markets to dashboard")
             
             # Emit data to dashboard
             self.socketio.emit('price_update', {
-                'data': list(self.global_price_dict.values())
+                'data': dashboard_data
             })
         except Exception as e:
             print(f"Error updating price dict: {e}")
+            import traceback
+            traceback.print_exc()
 
 def run_tracker_async():
     """Run the tracker in async event loop"""
@@ -115,8 +98,12 @@ def handle_connect():
     print('Client connected')
     # Send current data if available
     if tracker and tracker.global_price_dict:
+        dashboard_data = []
+        for market_key, market_data in tracker.global_price_dict.items():
+            dashboard_data.append(market_data)
+        
         emit('price_update', {
-            'data': list(tracker.global_price_dict.values())
+            'data': dashboard_data
         })
 
 @socketio.on('disconnect')
@@ -136,6 +123,23 @@ def handle_start_tracking():
         else:
             emit('status', {'message': 'Tracking already running'})
     except Exception as e:
+        print(f"Error starting tracker: {e}")
+        emit('status', {'message': f'Error starting tracker: {e}'})
+
+if __name__ == '__main__':
+    try:
+        print("All imports successful!")
+        print("Starting Flask-SocketIO server...")
+        print("Dashboard will be available at: http://localhost:5005")
+        print("Test endpoint available at: http://localhost:5005/test")
+        
+        # Start with simpler configuration first
+        socketio.run(app, debug=False, host='0.0.0.0', port=5005, allow_unsafe_werkzeug=True)
+    except Exception as e:
+        print(f"Error starting Flask app: {e}")
+        import traceback
+        traceback.print_exc()
+        input("Press Enter to exit...")
         print(f"Error starting tracker: {e}")
         emit('status', {'message': f'Error starting tracker: {e}'})
 

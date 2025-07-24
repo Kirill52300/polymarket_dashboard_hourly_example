@@ -103,7 +103,7 @@
 <body>
     <div class="header">
         <h1>Polymarket Crypto Price Dashboard</h1>
-        <p>Real-time crypto prices for markets ending within 1 hour</p>
+        <p>Real-time crypto prices for markets ending within 4 hours</p>
     </div>
 
     <div class="controls">
@@ -200,12 +200,24 @@
                 `;
             }
 
+            // Time remaining section
+            let timeRemainingHtml = '';
+            if (crypto.time_remaining) {
+                timeRemainingHtml = `
+                    <div class="price-row">
+                        <span class="price-label">Time Remaining:</span>
+                        <span class="price-value" style="color: #ffa500;">${crypto.time_remaining}</span>
+                    </div>
+                `;
+            }
+
             const lastUpdated = crypto.last_updated ? new Date(crypto.last_updated).toLocaleString() : 'Never';
             const orderbookUpdated = crypto.orderbook_updated ? new Date(crypto.orderbook_updated).toLocaleString() : 'Never';
 
             card.innerHTML = `
                 <div class="crypto-symbol">${crypto.symbol}</div>
                 <div class="market-title">${crypto.market_title}</div>
+                <div style="font-size: 12px; color: #666; margin-bottom: 10px;">Market ID: ${crypto.market_id}</div>
                 <div class="price-row">
                     <span class="price-label">Current Price:</span>
                     <span class="price-value current-price">$${crypto.current_price || 'N/A'}</span>
@@ -215,6 +227,7 @@
                     <span class="price-value trigger-price">$${crypto.trigger_price || 'N/A'}</span>
                 </div>
                 ${differenceHtml}
+                ${timeRemainingHtml}
                 ${upDownHtml}
                 <div class="last-updated">Price updated: ${lastUpdated}</div>
                 <div class="last-updated">Orderbook updated: ${orderbookUpdated}</div>
