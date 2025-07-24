@@ -21,10 +21,11 @@ class CryptoPriceTracker:
         self.update_counts = {}
         self.hourly_markets = []
         self.all_markets = {}  # Store all markets with ID as key
-        self.trigger_prices = {}  # Store trigger prices for symbols
-        self.global_price_dict = {}  # Global dictionary with current and trigger prices
+        self.trigger_prices = {}  # Store trigger prices for each market - now keyed by market_key
+        self.global_price_dict = {}  # Global dictionary with current and trigger prices - now keyed by market_id
         self.market_tokens = {}  # Store market tokens for order book requests
         self.order_book_task = None  # Task for order book fetching
+        self.events_refresh_task = None  # Task for periodic events refresh
         
     async def fetch_polymarket_events(self):
         """Fetch events from Polymarket API and filter for up-or-down-hourly markets"""
@@ -46,6 +47,28 @@ class CryptoPriceTracker:
         events = data.get("data", [])
         temp_symbols = set()
         
+        # Clean up expired markets first
+        current_time = datetime.now(timezone.utc)
+        expired_market_ids = []
+        
+        for market_id, market in self.all_markets.items():
+            market_end_date = market.get("endDate")
+            if market_end_date:
+                try:
+                    end_date = datetime.fromisoformat(market_end_date.replace('Z', '+00:00'))
+                    if current_time > end_date:
+                        expired_market_ids.append(market_id)
+                except Exception:
+                    continue
+        
+        # Remove expired markets
+        for market_id in expired_market_ids:
+            del self.all_markets[market_id]
+            print(f"Removed expired market: {market_id}")
+        
+        print(f"Processing {len(events)} events...")
+        markets_found = 0
+        
         for event in events:
             # Check for hourly series first
             has_hourly_series = False
@@ -61,7 +84,7 @@ class CryptoPriceTracker:
                 for market in markets:
                     market_id = market.get("id")
                     if market_id:
-                        # Check if market ends within 1 hour
+                        # Check if market ends within 4 hours
                         market_end_date = market.get("endDate")
                         
                         if market_end_date:
@@ -71,13 +94,18 @@ class CryptoPriceTracker:
                                 time_diff = end_date - now
                                 seconds_remaining = time_diff.total_seconds()
                                 
-                                if 0 < seconds_remaining <= 3600:  # 5 hours = 18000 seconds
+                                if 0 < seconds_remaining <= 3600:  # 4 hours = 14400 seconds
+                                    markets_found += 1
                                     self.all_markets[market_id] = market
                                     
                                     # Extract symbol from resolution source
                                     symbol = self.extract_symbol_from_resolution_source(market.get("resolutionSource", ""))
                                     if symbol:
                                         temp_symbols.add(symbol)
+                                        print(f"Found market for {symbol}: {market.get('question', 'Unknown')[:50]}... (ends in {time_diff})")
+                                        
+                                        # Use market_id as unique key to store multiple markets per symbol
+                                        market_key = f"{symbol}_{market_id}"
                                         
                                         # Store first token ID for order book requests
                                         clob_token_ids = market.get("clobTokenIds", [])
@@ -86,25 +114,45 @@ class CryptoPriceTracker:
                                             try:
                                                 token_list = json.loads(clob_token_ids) if isinstance(clob_token_ids, str) else clob_token_ids
                                                 if token_list and len(token_list) > 0:
-                                                    self.market_tokens[symbol] = {
+                                                    self.market_tokens[market_key] = {
                                                         "token_id": token_list[0],
                                                         "market_title": market.get("question", "Unknown Market"),
-                                                        "market_id": market_id
+                                                        "market_id": market_id,
+                                                        "symbol": symbol
                                                     }
+                                                    print(f"Added market token for {market_key}: {token_list[0]}")
                                             except (json.JSONDecodeError, IndexError):
                                                 print(f"Error parsing token IDs for market {market_id}")
                                         
-                                        # Get trigger price
+                                        # Get trigger price for each market individually
                                         start_date = market.get("eventStartTime")
                                         if start_date:
                                             trigger_price = await self.get_trigger_price(session, symbol, start_date)
                                             if trigger_price:
-                                                self.trigger_prices[symbol] = {
+                                                self.trigger_prices[market_key] = {
                                                     "price": trigger_price,
-                                                    "market_title": market.get("question", "Unknown Market")
+                                                    "market_title": market.get("question", "Unknown Market"),
+                                                    "market_id": market_id,
+                                                    "symbol": symbol
                                                 }
+                                                print(f"Added trigger price for {market_key}: ${trigger_price}")
+                                            else:
+                                                print(f"Failed to get trigger price for {market_key}")
                             except Exception as e:
+                                print(f"Error processing market {market_id}: {e}")
                                 continue
+        
+        print(f"Found {markets_found} markets within 4 hours")
+        print(f"Active symbols: {temp_symbols}")
+        print(f"Market tokens: {len(self.market_tokens)}")
+        print(f"Trigger prices: {len(self.trigger_prices)}")
+        
+        # Debug: Print all market keys
+        print("Market tokens keys:", list(self.market_tokens.keys()))
+        print("Trigger prices keys:", list(self.trigger_prices.keys()))
+        
+        # Clean up symbols and tokens for expired markets
+        self.cleanup_expired_data()
         
         # Update active symbols
         self.active_symbols = temp_symbols
@@ -117,6 +165,37 @@ class CryptoPriceTracker:
         # Initialize global price dictionary
         self.update_global_price_dict()
         
+    def cleanup_expired_data(self):
+        """Clean up symbols and tokens that are no longer in active markets"""
+        # Get current market IDs
+        current_market_ids = set(self.all_markets.keys())
+        
+        # Remove market tokens that are no longer active
+        market_keys_to_remove = []
+        for market_key in list(self.market_tokens.keys()):
+            market_id = self.market_tokens[market_key].get("market_id")
+            if market_id not in current_market_ids:
+                market_keys_to_remove.append(market_key)
+        
+        for market_key in market_keys_to_remove:
+            del self.market_tokens[market_key]
+            if market_key in self.trigger_prices:
+                del self.trigger_prices[market_key]
+            if market_key in self.global_price_dict:
+                del self.global_price_dict[market_key]
+            print(f"Cleaned up expired market: {market_key}")
+
+    async def periodic_events_refresh(self):
+        """Periodically refresh events every 60 seconds"""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Wait 60 seconds
+                print("Refreshing markets and trigger prices...")
+                await self.fetch_polymarket_events()
+                print(f"Markets refresh completed. Active symbols: {list(self.active_symbols)}")
+            except Exception as e:
+                print(f"Error during periodic events refresh: {e}")
+
     async def get_trigger_price(self, session, symbol, start_date):
         """Get trigger price from Polymarket API"""
         try:
@@ -165,8 +244,9 @@ class CryptoPriceTracker:
                 params = []
                 token_to_symbol_map = {}
                 
-                for symbol, token_data in self.market_tokens.items():
+                for market_key, token_data in self.market_tokens.items():
                     token_id = token_data["token_id"]
+                    symbol = token_data["symbol"]
                     params.append(BookParams(token_id=token_id))
                     token_to_symbol_map[token_id] = symbol
                 
@@ -199,8 +279,11 @@ class CryptoPriceTracker:
     async def process_order_books(self, order_books, token_to_symbol_map):
         """Process order book data and update UP/DOWN prices"""
         try:
-            # order_books is a list where each item corresponds to the token we requested
-            # We need to match the order of response with the order of our request
+            # Create mapping from token_id to market_key
+            token_to_market_key = {}
+            for market_key, token_data in self.market_tokens.items():
+                token_id = token_data["token_id"]
+                token_to_market_key[token_id] = market_key
             
             for i, book in enumerate(order_books):
                 # Get the token_id from our original request parameters
@@ -209,9 +292,9 @@ class CryptoPriceTracker:
                     token_ids = list(self.market_tokens.values())
                     if i < len(token_ids):
                         token_id = token_ids[i]["token_id"]
-                        symbol = token_to_symbol_map.get(token_id)
+                        market_key = token_to_market_key.get(token_id)
                         
-                        if not symbol:
+                        if not market_key:
                             continue
                         
                         # Get bids and asks
@@ -220,7 +303,6 @@ class CryptoPriceTracker:
                         
                         up_price = None
                         down_price = None
-                     #   print(bids)
                         
                         # Sort and get best prices
                         if asks:
@@ -233,11 +315,12 @@ class CryptoPriceTracker:
                             highest_bid_price = float(bids_sorted[0].get('price', 0))
                             down_price = 1 - highest_bid_price  # DOWN = 1 - highest bid
                         
-                        print(f"Order book for {symbol}: UP={up_price}, DOWN={down_price}")
+                        symbol = self.market_tokens[market_key]["symbol"]
+                        print(f"Order book for {market_key} ({symbol}): UP={up_price}, DOWN={down_price}")
                         
                         # Update global price dictionary with UP/DOWN prices
-                        if symbol in self.global_price_dict:
-                            self.global_price_dict[symbol].update({
+                        if market_key in self.global_price_dict:
+                            self.global_price_dict[market_key].update({
                                 "up_price": up_price,
                                 "down_price": down_price,
                                 "orderbook_updated": datetime.now().isoformat()
@@ -247,12 +330,22 @@ class CryptoPriceTracker:
             print(f"Error processing order books: {e}")
 
     def update_global_price_dict(self):
-        """Update global price dictionary with current and trigger prices"""
-        for symbol in self.symbols:
+        """Update global price dictionary with current and trigger prices - now per market"""
+        # Don't reset - preserve existing data
+        if not hasattr(self, 'global_price_dict') or self.global_price_dict is None:
+            self.global_price_dict = {}
+        
+        # Create entry for each market
+        for market_key, token_data in self.market_tokens.items():
+            symbol = token_data["symbol"]
+            market_id = token_data["market_id"]
+            market_title = token_data["market_title"]
+            
             current_price = self.prices.get(symbol, {}).get("price")
-            trigger_data = self.trigger_prices.get(symbol, {})
+            
+            # Get trigger price for this specific market
+            trigger_data = self.trigger_prices.get(market_key, {})
             trigger_price = trigger_data.get("price") if isinstance(trigger_data, dict) else trigger_data
-            market_title = trigger_data.get("market_title", "Unknown Market") if isinstance(trigger_data, dict) else "Unknown Market"
             
             # Calculate differences
             price_diff = None
@@ -261,28 +354,53 @@ class CryptoPriceTracker:
                 price_diff = current_price - trigger_price
                 price_diff_percent = (price_diff / trigger_price) * 100
             
-            self.global_price_dict[symbol] = {
+            # Get market end time
+            market = self.all_markets.get(market_id, {})
+            end_date = market.get("endDate")
+            time_remaining = self.calculate_time_to_end(end_date) if end_date else "Unknown"
+            
+            # Get existing order book data if available - preserve existing data
+            existing_data = self.global_price_dict.get(market_key, {})
+            
+            # Update or create market data
+            self.global_price_dict[market_key] = {
+                "market_id": market_id,
+                "market_key": market_key,
+                "symbol": symbol,
                 "market_title": market_title,
                 "current_price": current_price,
                 "trigger_price": trigger_price,
                 "price_difference": price_diff,
                 "price_difference_percent": price_diff_percent,
                 "last_updated": self.prices.get(symbol, {}).get("timestamp"),
-                "up_price": None,  # Will be updated by order book processing
-                "down_price": None,  # Will be updated by order book processing
-                "orderbook_updated": None
+                "up_price": existing_data.get("up_price"),  # Preserve existing order book data
+                "down_price": existing_data.get("down_price"),
+                "orderbook_updated": existing_data.get("orderbook_updated"),
+                "time_remaining": time_remaining,
+                "end_date": end_date
             }
         
+        # Remove markets that are no longer active
+        market_keys_to_remove = []
+        for market_key in list(self.global_price_dict.keys()):
+            if market_key not in self.market_tokens:
+                market_keys_to_remove.append(market_key)
+        
+        for market_key in market_keys_to_remove:
+            del self.global_price_dict[market_key]
+            print(f"Removed market from global dict: {market_key}")
+        
         # Print the global dictionary
-        print("\n=== GLOBAL PRICE DICTIONARY ===")
-        for symbol, data in self.global_price_dict.items():
-            print(f"{symbol} - {data['market_title']}:")
+        print(f"\n=== GLOBAL PRICE DICTIONARY ({len(self.global_price_dict)} markets) ===")
+        for market_key, data in self.global_price_dict.items():
+            print(f"{data['symbol']} ({data['market_id']}) - {data['market_title'][:50]}...")
             print(f"  Current: ${data['current_price']}")
             print(f"  Trigger: ${data['trigger_price']}")
             if data['price_difference'] is not None:
                 sign = "+" if data['price_difference'] >= 0 else ""
                 print(f"  Difference: {sign}${data['price_difference']:.2f} ({sign}{data['price_difference_percent']:.2f}%)")
-            print(f"  Updated: {data['last_updated']}")
+            print(f"  UP: ${data['up_price']} DOWN: ${data['down_price']}")
+            print(f"  Time remaining: {data['time_remaining']}")
             print()
         print("=" * 50)
 
@@ -313,7 +431,6 @@ class CryptoPriceTracker:
             try:
                 await self._connect_websocket(symbol)
             except Exception as e:
-                print(f"WebSocket error for {symbol}: {e}")
                 await asyncio.sleep(5)
                 
     async def _connect_websocket(self, symbol: str):
@@ -337,64 +454,17 @@ class CryptoPriceTracker:
             
             await websocket.send(json.dumps(subscription_message))
             
-            # Create task for handling messages
-            message_task = asyncio.create_task(self._handle_messages(websocket, symbol))
-            
-            # Create timer task for 5-minute reconnection
-            timer_task = asyncio.create_task(asyncio.sleep(500))  # 5 minutes = 300 seconds
-            
-            try:
-                # Wait for either message handling to complete or timer to expire
-                done, pending = await asyncio.wait(
-                    [message_task, timer_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Cancel pending tasks
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                
-                # Check which task completed
-                for task in done:
-                    if task == timer_task:
-                        print(f"5-minute timer expired for {symbol}, reconnecting...")
-                    else:
-                        # Message task completed (probably due to error)
-                        try:
-                            await task  # This will raise the exception if there was one
-                        except Exception as e:
-                            print(f"Message handling error for {symbol}: {e}")
-                            
-            except Exception as e:
-                print(f"WebSocket connection error for {symbol}: {e}")
-            finally:
-                # Clean up connection reference
-                if symbol in self.connections:
-                    del self.connections[symbol]
-                    
-    async def _handle_messages(self, websocket, symbol: str):
-        """Handle incoming WebSocket messages"""
-        try:
+            # Listen for messages until restart threshold
             async for message in websocket:
                 await self.handle_message(message, symbol)
                 
-                # Check if we need to restart this connection based on update count
-                if self.update_counts[symbol] >= 1000:  # Increased threshold since we have 5-min timer
-                    print(f"Update count threshold reached for {symbol}, reconnecting...")
+                # Check if we need to restart this connection
+                if self.update_counts[symbol] >= 100:
                     self.update_counts[symbol] = 0
                     break
-        except websockets.exceptions.ConnectionClosed:
-            print(f"WebSocket connection closed for {symbol}")
-        except Exception as e:
-            print(f"Error handling messages for {symbol}: {e}")
-            raise
                     
     async def handle_message(self, message: str, symbol: str):
-        """Handle incoming WebSocket messages and update prices"""
+        """Handle incoming WebSocket messages"""
         try:
             data = json.loads(message)
             if data.get("topic") == "crypto_prices" and data.get("type") == "update":
@@ -418,12 +488,15 @@ class CryptoPriceTracker:
         except json.JSONDecodeError:
             pass
         except Exception as e:
-            print(f"Error processing message for {symbol}: {e}")
+            pass
         
     async def start_tracking(self):
         """Start tracking all crypto symbols with separate connections"""
         # First fetch Polymarket events to update symbols
         await self.fetch_polymarket_events()
+        
+        # Start periodic events refresh task
+        self.events_refresh_task = asyncio.create_task(self.periodic_events_refresh())
         
         # Start order book fetching task
         if self.market_tokens:
@@ -435,9 +508,10 @@ class CryptoPriceTracker:
             task = asyncio.create_task(self.connect_to_symbol(symbol))
             tasks.append(task)
         
-        # Add order book task if it exists
+        # Add background tasks
         if self.order_book_task:
             tasks.append(self.order_book_task)
+        tasks.append(self.events_refresh_task)
             
         # Run all connections concurrently
         await asyncio.gather(*tasks, return_exceptions=True)
