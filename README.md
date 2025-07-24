@@ -31,6 +31,8 @@ python app.py
 
 3. Open browser to `http://localhost:5005`
 
+4. Press  "Start Tracking" button
+
 ## Files
 
 - `app.py` - Main Flask application with WebSocket support
